@@ -75,6 +75,32 @@ class _FakeRedisLock:
             self._acquired = False
 
 
+class _FakeSession:
+    def __init__(self, end_user: object | None) -> None:
+        self.end_user = end_user
+        self.scalar_calls: list[object] = []
+
+    def __enter__(self) -> "_FakeSession":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def scalar(self, statement: object) -> object | None:
+        self.scalar_calls.append(statement)
+        return self.end_user
+
+
+class _FakeSessionFactory:
+    def __init__(self, end_user: object | None) -> None:
+        self.session = _FakeSession(end_user)
+        self.create_session_calls = 0
+
+    def create_session(self) -> _FakeSession:
+        self.create_session_calls += 1
+        return self.session
+
+
 def _build_model_schema() -> AIModelEntity:
     return AIModelEntity(
         model="gpt-4o-mini",
@@ -316,6 +342,170 @@ class TestPluginModelRuntime:
             stream=True,
             app_id="app-1",
         )
+
+    def test_invoke_llm_sends_end_user_session_id_to_openrouter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = Mock(spec=PluginModelClient)
+        client.invoke_llm.return_value = iter([])
+        session_factory = _FakeSessionFactory(SimpleNamespace(session_id="nikhil.pandey"))
+        monkeypatch.setattr(model_runtime_module, "session_factory", session_factory, raising=False)
+        runtime = PluginModelRuntime(
+            tenant_id="tenant",
+            user_id="0c821254-1052-4249-89f6-9b3115e79aca",
+            client=client,
+            plugin_service=PluginService,
+        )
+
+        result = runtime.invoke_llm(
+            provider="langgenius/openrouter/openrouter",
+            model="openai/gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={"temperature": 0.3},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+        assert list(result) == []
+        assert session_factory.create_session_calls == 1
+        assert len(session_factory.session.scalar_calls) == 1
+        client.invoke_llm.assert_called_once_with(
+            tenant_id="tenant",
+            user_id="nikhil.pandey",
+            plugin_id="langgenius/openrouter",
+            provider="openrouter",
+            model="openai/gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={"temperature": 0.3},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+    def test_invoke_llm_sends_end_user_session_id_to_openrouter_shorthand(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = Mock(spec=PluginModelClient)
+        client.invoke_llm.return_value = iter([])
+        session_factory = _FakeSessionFactory(SimpleNamespace(session_id="nikhil.pandey"))
+        monkeypatch.setattr(model_runtime_module, "session_factory", session_factory, raising=False)
+        runtime = PluginModelRuntime(
+            tenant_id="tenant",
+            user_id="0c821254-1052-4249-89f6-9b3115e79aca",
+            client=client,
+            plugin_service=PluginService,
+        )
+
+        result = runtime.invoke_llm(
+            provider="openrouter",
+            model="openai/gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={"temperature": 0.3},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+        assert list(result) == []
+        assert session_factory.create_session_calls == 1
+        assert client.invoke_llm.call_args.kwargs["user_id"] == "nikhil.pandey"
+        assert client.invoke_llm.call_args.kwargs["plugin_id"] == "langgenius/openrouter"
+        assert client.invoke_llm.call_args.kwargs["provider"] == "openrouter"
+
+    def test_invoke_llm_keeps_bound_user_for_non_openrouter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = Mock(spec=PluginModelClient)
+        client.invoke_llm.return_value = iter([])
+        session_factory = Mock()
+        monkeypatch.setattr(model_runtime_module, "session_factory", session_factory, raising=False)
+        runtime = PluginModelRuntime(
+            tenant_id="tenant",
+            user_id="0c821254-1052-4249-89f6-9b3115e79aca",
+            client=client,
+            plugin_service=PluginService,
+        )
+
+        result = runtime.invoke_llm(
+            provider="langgenius/openai/openai",
+            model="gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={"temperature": 0.3},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+        assert list(result) == []
+        session_factory.create_session.assert_not_called()
+        client.invoke_llm.assert_called_once_with(
+            tenant_id="tenant",
+            user_id="0c821254-1052-4249-89f6-9b3115e79aca",
+            plugin_id="langgenius/openai",
+            provider="openai",
+            model="gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={"temperature": 0.3},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+    @pytest.mark.parametrize("end_user", [None, SimpleNamespace(session_id=""), SimpleNamespace(session_id="   ")])
+    def test_invoke_llm_falls_back_to_bound_user_when_openrouter_session_id_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch, end_user: object | None
+    ) -> None:
+        client = Mock(spec=PluginModelClient)
+        client.invoke_llm.return_value = iter([])
+        session_factory = _FakeSessionFactory(end_user)
+        monkeypatch.setattr(model_runtime_module, "session_factory", session_factory, raising=False)
+        runtime = PluginModelRuntime(
+            tenant_id="tenant",
+            user_id="0c821254-1052-4249-89f6-9b3115e79aca",
+            client=client,
+            plugin_service=PluginService,
+        )
+
+        result = runtime.invoke_llm(
+            provider="langgenius/openrouter/openrouter",
+            model="openai/gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+        assert list(result) == []
+        assert session_factory.create_session_calls == 1
+        assert client.invoke_llm.call_args.kwargs["user_id"] == "0c821254-1052-4249-89f6-9b3115e79aca"
+
+    def test_invoke_llm_keeps_none_user_for_openrouter_without_bound_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = Mock(spec=PluginModelClient)
+        client.invoke_llm.return_value = iter([])
+        session_factory = Mock()
+        monkeypatch.setattr(model_runtime_module, "session_factory", session_factory, raising=False)
+        runtime = PluginModelRuntime(tenant_id="tenant", user_id=None, client=client, plugin_service=PluginService)
+
+        result = runtime.invoke_llm(
+            provider="langgenius/openrouter/openrouter",
+            model="openai/gpt-4o-mini",
+            credentials={"api_key": "secret"},
+            model_parameters={},
+            prompt_messages=[],
+            tools=None,
+            stop=None,
+            stream=True,
+        )
+
+        assert list(result) == []
+        session_factory.create_session.assert_not_called()
+        assert client.invoke_llm.call_args.kwargs["user_id"] is None
 
     def test_invoke_llm_ignores_non_string_app_id_request_metadata(self) -> None:
         client = Mock(spec=PluginModelClient)

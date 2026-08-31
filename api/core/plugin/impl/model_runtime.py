@@ -8,8 +8,10 @@ from typing import IO, Any, Literal, cast, overload, override
 from pydantic import ValidationError
 from pydantic.json_schema import JsonValue
 from redis import RedisError
+from sqlalchemy import select
 
 from configs import dify_config
+from core.db.session_factory import session_factory
 from core.llm_generator.output_parser.structured_output import (
     invoke_llm_with_structured_output as invoke_llm_with_structured_output_helper,
 )
@@ -33,6 +35,7 @@ from graphon.model_runtime.entities.text_embedding_entities import EmbeddingInpu
 from graphon.model_runtime.model_providers.base.large_language_model import normalize_non_stream_runtime_result
 from graphon.model_runtime.protocols.runtime import ModelRuntime
 from graphon.model_runtime.protocols.tts_runtime import TTSModelVoice
+from models.model import EndUser
 from models.provider_ids import ModelProviderID
 
 logger = logging.getLogger(__name__)
@@ -323,10 +326,11 @@ class PluginModelRuntime(ModelRuntime):
         if not isinstance(app_id, str):
             app_id = None
         plugin_id, provider_name = self._split_provider(provider)
+        invoke_user_id = self._resolve_llm_invoke_user_id(plugin_id=plugin_id, provider_name=provider_name)
         if app_id is None:
             result = self.client.invoke_llm(
                 tenant_id=self.tenant_id,
-                user_id=self.user_id,
+                user_id=invoke_user_id,
                 plugin_id=plugin_id,
                 provider=provider_name,
                 model=model,
@@ -340,7 +344,7 @@ class PluginModelRuntime(ModelRuntime):
         else:
             result = self.client.invoke_llm(
                 tenant_id=self.tenant_id,
-                user_id=self.user_id,
+                user_id=invoke_user_id,
                 plugin_id=plugin_id,
                 provider=provider_name,
                 model=model,
@@ -748,3 +752,17 @@ class PluginModelRuntime(ModelRuntime):
     def _split_provider(self, provider: str) -> tuple[str, str]:
         provider_id = ModelProviderID(provider)
         return provider_id.plugin_id, provider_id.provider_name
+
+    def _resolve_llm_invoke_user_id(self, *, plugin_id: str, provider_name: str) -> str | None:
+        if plugin_id != "langgenius/openrouter" or provider_name != "openrouter" or self.user_id is None:
+            return self.user_id
+
+        with session_factory.create_session() as session:
+            end_user = session.scalar(
+                select(EndUser).where(EndUser.id == self.user_id, EndUser.tenant_id == self.tenant_id)
+            )
+
+        session_id = getattr(end_user, "session_id", None)
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id
+        return self.user_id
