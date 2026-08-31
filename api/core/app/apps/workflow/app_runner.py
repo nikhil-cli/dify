@@ -21,6 +21,7 @@ from core.app.entities.app_invoke_entities import (
 )
 from core.app.workflow.layers.persistence import PersistenceWorkflowInfo, WorkflowPersistenceLayer
 from core.repositories.factory import WorkflowExecutionRepository, WorkflowNodeExecutionRepository
+from core.workflow.llm_environment_variable import LLMEnvironmentVariable, LLMModelSelection
 from core.workflow.node_factory import get_default_root_node_id
 from core.workflow.nodes.agent_v2.workspace_retirement_layer import build_workflow_agent_workspace_retirement_layer
 from core.workflow.snippet_start import get_compatible_start_aliases
@@ -36,6 +37,7 @@ from graphon.graph_engine.command_channels import RedisChannel
 from graphon.graph_engine.layers import GraphEngineLayer
 from graphon.runtime import GraphRuntimeState, VariablePool
 from graphon.variable_loader import VariableLoader
+from graphon.variables.variables import VariableBase
 from libs.datetime_utils import naive_utc_now
 from models.workflow import Workflow
 
@@ -76,6 +78,34 @@ class WorkflowAppRunner(WorkflowBasedAppRunner):
         self._workflow_node_execution_repository = workflow_node_execution_repository
         self._resume_graph_runtime_state = graph_runtime_state
         self._response_stream_filter = response_stream_filter
+
+    def _apply_env_var_overrides(self, environment_variables: Sequence[VariableBase]) -> Sequence[VariableBase]:
+        """Apply request-scoped LLM model overrides, without persisting them to the workflow.
+
+        Unknown variable names, or variables that aren't `llm`-type environment variables, are
+        silently ignored and the workflow's configured model is used instead.
+        """
+        overrides = self.application_generate_entity.extras.get("env_var_overrides") or {}
+        if not overrides:
+            return environment_variables
+
+        result = list(environment_variables)
+        for index, variable in enumerate(result):
+            override = overrides.get(variable.name)
+            if override is None or not isinstance(variable, LLMEnvironmentVariable):
+                continue
+            try:
+                selection = LLMModelSelection.model_validate(variable.value)
+                updated_selection = selection.model_copy(
+                    update={"provider": override["provider"], "name": override["name"]}
+                )
+            except (KeyError, TypeError, ValueError):
+                logger.info("Ignoring invalid env_var_overrides entry for '%s'", variable.name)
+                continue
+            result[index] = variable.model_copy(
+                update={"value": updated_selection.model_dump(mode="json", exclude_none=True)}
+            )
+        return result
 
     @trace_span(WorkflowAppRunnerHandler)
     def run(self):
@@ -133,7 +163,7 @@ class WorkflowAppRunner(WorkflowBasedAppRunner):
                 variable_pool,
                 build_bootstrap_variables(
                     system_variables=system_inputs,
-                    environment_variables=self._workflow.environment_variables,
+                    environment_variables=self._apply_env_var_overrides(self._workflow.environment_variables),
                 ),
             )
             root_node_id = self._root_node_id or get_default_root_node_id(self._workflow.graph_dict)

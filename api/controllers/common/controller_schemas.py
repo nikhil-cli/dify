@@ -175,6 +175,13 @@ class WorkflowListQuery(BaseModel):
     named_only: bool = False
 
 
+class LLMModelOverride(BaseModel):
+    """A transient provider/model override for a single workflow run."""
+
+    provider: str = Field(min_length=1, description="Model provider to use for this run, e.g. `openai`.")
+    name: str = Field(min_length=1, description="Model name to use for this run, e.g. `gpt-4o-mini`.")
+
+
 class WorkflowRunPayload(BaseModel):
     inputs: dict[str, Any] = Field(
         description=(
@@ -190,6 +197,15 @@ class WorkflowRunPayload(BaseModel):
             "File list for workflow system file inputs. Available when file upload is enabled for the workflow. "
             "To attach a local file, first upload it via [Upload File](/api-reference/files/upload-file) and use "
             "the returned `id` as `upload_file_id` with `transfer_method: local_file`."
+        ),
+    )
+    env_var_overrides: dict[str, LLMModelOverride] | None = Field(
+        default=None,
+        description=(
+            "Per-run overrides for `llm`-type environment variables, keyed by variable name. Only applies to "
+            "environment variables the workflow already exposes as `llm`-type with a node's `model_selector` "
+            "pointing at them; unknown or incompatible names are ignored and the workflow's configured model is "
+            "used instead. Overrides are not persisted to the workflow."
         ),
     )
 

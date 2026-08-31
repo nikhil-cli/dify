@@ -199,6 +199,7 @@ class WorkflowAppGenerator(BaseAppGenerator):
                 **extract_external_trace_id_from_args(args),
                 **extract_parent_trace_context_from_args(args),
                 **extract_trace_session_id_from_args(args),
+                "env_var_overrides": args.get("env_var_overrides") or {},
             }
             workflow_run_id = str(workflow_run_id or uuid.uuid4())
             # FIXME (Yeuoly): we need to remove the SKIP_PREPARE_USER_INPUTS_KEY from the args
